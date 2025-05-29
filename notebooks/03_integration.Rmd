@@ -23,7 +23,7 @@ library(tidyverse)
 We'll load some data from the SeuratData package that contains IFNB-Stimulated and Control PBMCs
 
 ```{r}
-# data(ifnb)
+data(ifnb)
 ```
 
 The loaded data isn't processed at all, so we'll fly through that
