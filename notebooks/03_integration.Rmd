@@ -23,13 +23,14 @@ library(tidyverse)
 We'll load some data from the SeuratData package that contains IFNB-Stimulated and Control PBMCs
 
 ```{r}
-data(ifnb)
+# data(ifnb)
 ```
 
 The loaded data isn't processed at all, so we'll fly through that
 
 ```{r}
 seurat <- ifnb
+seurat <- UpdateSeuratObject(seurat)
 seurat <- NormalizeData(seurat)
 seurat <- FindVariableFeatures(seurat)
 seurat <- ScaleData(seurat)
@@ -58,74 +59,95 @@ DimPlot(seurat, group.by="stim")
 
 So how do we test the effects of stimulation on cell types? Some clusters contain both conditions (cluster 4 = NK & CD8 T), while others span multiple clusters (Cluster 0 & 3 = CD4 Naive T).
 
-# Integration
-The goal of integration is to find an embedding that aligns samples by a specific experimental or technical variable, negating its effects on the embedding. There are multiple methods for doing this, but here we'll stay in the Seurat echo system and use their approach.
+# Integration in Seurat v5
+
+This new section updates the integration analysis to use a new method introduced with Seurat v5. The original integration
+
+The goal of integration is to find an embedding that aligns samples by a specific experimental or technical variable, negating its effects on the embedding. There are multiple methods for doing this, but here we'll stay in the Seurat ecosystem and use their approach.
+
+In Seurat versions prior to v5, integration required two separate Seurat objects to be integrated; in Seurat v5 we can split the RNA assay into two `layers`, repeat the standard analysis pipeline on the split layers, then create the new embedding from the split assay.
 
 ```{r}
-ifnb.list <- SplitObject(ifnb, split.by = "stim")
-
-ifnb.list <- lapply(ifnb.list, FUN = function(x) {
-    x <- NormalizeData(x)
-    x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
-})
-
-features <- SelectIntegrationFeatures(object.list = ifnb.list)
+    seurat[["RNA"]] <- split(seurat[["RNA"]],f=seurat$stim)
 ```
 
-```{r}
-immune.anchors <- FindIntegrationAnchors(object.list = ifnb.list, 
-                                         anchor.features = features)
-seurat <- IntegrateData(anchorset = immune.anchors)
-seurat
-```
-
-Notice that we have a new activate "assay" in our Seurat object: "integrated"
-This contains aligned expression values that allow us to re-run the normal pipeline and get an integrated embedding:
+We need to repeat the steps up to PCA on the split object prior to integrating
 
 ```{r}
+seurat <- NormalizeData(seurat)
+seurat <- FindVariableFeatures(seurat)
 seurat <- ScaleData(seurat)
 seurat <- RunPCA(seurat, verbose=F)
-seurat <- RunUMAP(seurat, dims=1:30)
-seurat <- FindNeighbors(seurat, dims=1:30)
-seurat <- FindClusters(seurat, resolution=0.3)
+```
+
+Having split the assay and created a new PCA reduction, a single command runs the integration. We're going to use the `CCA` method (canonical ... analysis) to integrate the data, but the streamlined integration approach in v5 offers several methods for integrating the samples:
+
+# Anchor-based CCA integration (method=CCAIntegration)
+# Anchor-based RPCA integration (method=RPCAIntegration)
+# Harmony (method=HarmonyIntegration)
+# FastMNN (method= FastMNNIntegration)
+# scVI (method=scVIIntegration)
+
+The [Seurat v5 integration vignette](https://satijalab.org/seurat/articles/seurat5_integration) on the Seurat website provides more details.
+
+```{r}
+seurat <- IntegrateLayers(obj=seurat,
+                          method=CCAIntegration,
+                          orig.reduction="pca",
+                          new.reduction="integrated.cca")
+```
+
+We have added the `integrated.cca` dimensional reduction to the Seurat object - now we can repeat UMAP generation and clustering on this assay.
+
+```{r}
+seurat <- RunUMAP(seurat,reduction="integrated.cca",dims=1:30,reduction.name="umap.cca")
 ```
 
 ```{r}
-DimPlot(seurat, label=T)
-DimPlot(seurat, group.by="stim")
-DimPlot(seurat, group.by="seurat_annotations", label=T)
+DimPlot(seurat,reduction="umap.cca",label=T)
+```
+
+The position of cells in the UMAP projection has changed, and the clusters we identified earlier overlap with each other. Continue the process of finding clusters in the `integrated.cca` dimensional reduction and show these new clusters on the UMAP plot.
+
+```{r}
+seurat<-FindNeighbors(seurat,reduction="integrated.cca",dims=1:30)
+seurat<-FindClusters(seurat,resolution=0.3)
+```
+
+```{r}
+DimPlot(seurat, reduction="umap.cca", label=T)
+DimPlot(seurat, reduction="umap.cca", group.by="stim")
+DimPlot(seurat, reduction="umap.cca", group.by="seurat_annotations", label=T)
 ```
 
 Now our clusters correspond to individual cell types and are not separated by experimental condition. This is great because now we can take each cluster and do differential expression between conditions and this will tell us how each cell type is affected by stimulation. We'll get to that in a second.
 
-Integration is great to define unified clusters that aren't driven by experimental/technical variables. If this variable is an uninteresting technical feature (eg. batch effect), we can just continue with using this UMAP. But often in papers, we want unified clusters, but want out UMAPs to still show the effect of our experimental condition. To do this, you can switch back to the RNA assay (unintegrated data), and re-run PCA and UMAP but skip the clustering:
+Integration is great to define unified clusters that aren't driven by experimental/technical variables. If this variable is an uninteresting technical feature (eg. batch effect), we can just continue with using this UMAP. But often in papers, we want unified clusters, but want our UMAPs to still show the effect of our experimental condition. 
+
+Because we saved our new 'CCA' UMAP with a different name, both the original and new UMAP projections are stored in our seurat object (named `umap` and `umap.cca`). We can show our new (CCA integrated) clusters on the original UMAP projection without having to re-run `ScaleData`, `RunPCA`, and `RunUMAP`.
+
 ```{r}
-DefaultAssay(seurat) <- "RNA"
-seurat <- FindVariableFeatures(seurat)
-seurat <- ScaleData(seurat)
-seurat <- RunPCA(seurat, verbose=F)
-seurat <- RunUMAP(seurat, dims=1:30)
-#NO CLUSTERING--we'll keep the clusters from the last section
-```
-```{r}
-DimPlot(seurat, group.by="stim")
-DimPlot(seurat)
+DimPlot(seurat, reduction="umap", group.by="stim")
+DimPlot(seurat,reduction="umap")
 ```
 
-And we've maintained the unified clusters.
+We've maintained the unified clusters, but the treatment effect is also retained in the UMAP.
 
 ## Differential expression between conditions
-**IMPORTANT:** A common mistake people make is that they integrate the data, but then keep using the integrated assay's "expression" values. These values have been transformed to eliminate the variable you've integrated on. They are important for integration itself, but no longer reflect expression values and also contain dependencies that violate common statistics.
 
-[**Even if you are using integrated data, you should use the RNA assay to look at gene expression and perform differential expression**]("https://github.com/satijalab/seurat/issues/1717")
+Integration in earlier Seurat releases required creation of a new 'integrated' assay that contained modified expression values; when this was done we had to be careful to switch back to the `RNA` assay prior to calculating expression differences between the conditions.
 
-I already switch back to the RNA assay in the last section, but I will do it again to emphasize my point
+With Seurat v5 we haven't added a new assay to the object, but we did split the RNA assay into two parts. To calculate differentially-expressed genes between the treatments for each cell type we need to re-join the RNA data into a single layer prior to running the differential expression test.
 ```{r}
-DefaultAssay(seurat) <- "RNA"
-seurat #print out the seurat object to confirm you are using the right assay
+# DefaultAssay(seurat) <- "RNA"
+seurat #print out the seurat object to show the split layers
+
+seurat<-JoinLayers(seurat)
+
+seurat # Re-print the object to show that layers have been joined.
 ```
 
-With n=1 for the conditions, you are a little limited to what types of tests you can do, but the most common approach is likely to use a Wilcoxon test between conditions, treating each cell as an individual measurement. **If you have replicates for conditions,** best practice is probably to perform differential expression using standard bulk RNA-seq methods on pseudobulk data (ie. summing up all gene counts across cells of a replicate in a specific cluster). Check out the R package [muscat](https://www.nature.com/articles/s41467-020-19894-4) for this. It performs pseudobulking and implements a variety of standard methods (DESeq, edgeR, etc).
+With n=1 for the conditions, we are a little limited to what types of tests we can do, but the most common approach is likely to use a Wilcoxon test between conditions, treating each cell as an individual measurement. **If you have replicates for conditions,** best practice is probably to perform differential expression using standard bulk RNA-seq methods on pseudobulk data (ie. summing up all gene counts across cells of a replicate in a specific cluster). Check out the R package [muscat](https://www.nature.com/articles/s41467-020-19894-4) for this. It performs pseudobulking and implements a variety of standard methods (DESeq, edgeR, etc).
 
 Let's just proceed with our n=1. Seurat's FindMarkers() function can perform the Wilcoxon test for us. I'll just perform differential expression for a single cell type / cluster (CD14 monocytes; cluster 0) here, but I'll include a function below that will iterate through this for all clusters
 
